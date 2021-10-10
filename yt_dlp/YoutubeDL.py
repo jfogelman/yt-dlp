@@ -9,6 +9,7 @@ import copy
 import datetime
 import errno
 import fileinput
+import functools
 import io
 import itertools
 import json
@@ -42,6 +43,7 @@ from .compat import (
     compat_urllib_error,
     compat_urllib_request,
     compat_urllib_request_DataHandler,
+    windows_enable_vt_mode,
 )
 from .cookies import load_cookies
 from .utils import (
@@ -67,8 +69,6 @@ from .utils import (
     float_or_none,
     format_bytes,
     format_field,
-    STR_FORMAT_RE_TMPL,
-    STR_FORMAT_TYPES,
     formatSeconds,
     GeoRestrictedError,
     HEADRequest,
@@ -101,9 +101,13 @@ from .utils import (
     sanitize_url,
     sanitized_Request,
     std_headers,
+    STR_FORMAT_RE_TMPL,
+    STR_FORMAT_TYPES,
     str_or_none,
     strftime_or_none,
     subtitles_filename,
+    supports_terminal_sequences,
+    TERMINAL_SEQUENCES,
     ThrottledDownload,
     to_high_limit_path,
     traverse_obj,
@@ -134,6 +138,7 @@ from .downloader import (
 from .downloader.rtmp import rtmpdump_version
 from .postprocessor import (
     get_postprocessor,
+    EmbedThumbnailPP,
     FFmpegFixupDurationPP,
     FFmpegFixupM3u8PP,
     FFmpegFixupM4aPP,
@@ -248,6 +253,7 @@ class YoutubeDL(object):
     rejecttitle:       Reject downloads for matching titles.
     logger:            Log messages to a logging.Logger instance.
     logtostderr:       Log messages to stderr instead of stdout.
+    consoletitle:       Display progress in console window's titlebar.
     writedescription:  Write the video description to a .description file
     writeinfojson:     Write the video description to a .info.json file
     clean_infojson:    Remove private fields from the infojson
@@ -325,7 +331,8 @@ class YoutubeDL(object):
                        * when: When to run the postprocessor. Can be one of
                                pre_process|before_dl|post_process|after_move.
                                Assumed to be 'post_process' if not given
-    post_hooks:        A list of functions that get called as the final step
+    post_hooks:        Deprecated - Register a custom postprocessor instead
+                       A list of functions that get called as the final step
                        for each video file, after all postprocessors have been
                        called. The filename will be passed as the only argument.
     progress_hooks:    A list of functions that get called on download
@@ -353,6 +360,15 @@ class YoutubeDL(object):
 
                        Progress hooks are guaranteed to be called at least once
                        (with status "finished") if the download is successful.
+    postprocessor_hooks:  A list of functions that get called on postprocessing
+                       progress, with a dictionary with the entries
+                       * status: One of "started", "processing", or "finished".
+                                 Check this first and ignore unknown values.
+                       * postprocessor: Name of the postprocessor
+                       * info_dict: The extracted info_dict
+
+                       Progress hooks are guaranteed to be called at least twice
+                       (with status "started" and "finished") if the processing is successful.
     merge_output_format: Extension to use when merging formats.
     final_ext:         Expected final extension; used to detect when the file was
                        already downloaded and converted. "merge_output_format" is
@@ -409,15 +425,20 @@ class YoutubeDL(object):
                        use downloader suggested by extractor if None.
     compat_opts:       Compatibility options. See "Differences in default behavior".
                        The following options do not work when used through the API:
-                       filename, abort-on-error, multistreams, no-live-chat,
+                       filename, abort-on-error, multistreams, no-live-chat, format-sort
                        no-clean-infojson, no-playlist-metafiles, no-keep-subs.
                        Refer __init__.py for their implementation
+    progress_template: Dictionary of templates for progress outputs.
+                       Allowed keys are 'download', 'postprocess',
+                       'download-title' (console title) and 'postprocess-title'.
+                       The template is mapped on a dictionary with keys 'progress' and 'info'
 
     The following parameters are not used by YoutubeDL itself, they are used by
     the downloader (see yt_dlp/downloader/common.py):
     nopart, updatetime, buffersize, ratelimit, throttledratelimit, min_filesize,
-    max_filesize, test, noresizebuffer, retries, continuedl, noprogress, consoletitle,
-    xattr_set_filesize, external_downloader_args, hls_use_mpegts, http_chunk_size.
+    max_filesize, test, noresizebuffer, retries, fragment_retries, continuedl,
+    noprogress, xattr_set_filesize, hls_use_mpegts, http_chunk_size,
+    external_downloader_args.
 
     The following options are used by the post processors:
     prefer_ffmpeg:     If False, use avconv instead of ffmpeg if both are available,
@@ -484,16 +505,16 @@ class YoutubeDL(object):
         self._first_webpage_request = True
         self._post_hooks = []
         self._progress_hooks = []
+        self._postprocessor_hooks = []
         self._download_retcode = 0
         self._num_downloads = 0
         self._screen_file = [sys.stdout, sys.stderr][params.get('logtostderr', False)]
         self._err_file = sys.stderr
-        self.params = {
-            # Default parameters
-            'nocheckcertificate': False,
-        }
-        self.params.update(params)
+        self.params = params
         self.cache = Cache(self)
+
+        windows_enable_vt_mode()
+        self.params['no_color'] = self.params.get('no_color') or not supports_terminal_sequences(self._err_file)
 
         if sys.version_info < (3, 6):
             self.report_warning(
@@ -501,9 +522,10 @@ class YoutubeDL(object):
 
         if self.params.get('allow_unplayable_formats'):
             self.report_warning(
-                'You have asked for unplayable formats to be listed/downloaded. '
-                'This is a developer option intended for debugging. '
-                'If you experience any issues while using this option, DO NOT open a bug report')
+                f'You have asked for {self._color_text("unplayable formats", "blue")} to be listed/downloaded. '
+                'This is a developer option intended for debugging. \n'
+                '         If you experience any issues while using this option, '
+                f'{self._color_text("DO NOT", "red")} open a bug report')
 
         def check_deprecated(param, option, suggestion):
             if self.params.get(param) is not None:
@@ -522,13 +544,13 @@ class YoutubeDL(object):
         for msg in self.params.get('warnings', []):
             self.report_warning(msg)
 
-        if self.params.get('overwrites') is None:
-            self.params.pop('overwrites', None)
-        elif self.params.get('nooverwrites') is not None:
+        if 'overwrites' not in self.params and self.params.get('nooverwrites') is not None:
             # nooverwrites was unnecessarily changed to overwrites
             # in 0c3d0f51778b153f65c21906031c2e091fcfb641
             # This ensures compatibility with both keys
             self.params['overwrites'] = not self.params['nooverwrites']
+        elif self.params.get('overwrites') is None:
+            self.params.pop('overwrites', None)
         else:
             self.params['nooverwrites'] = not self.params['overwrites']
 
@@ -675,8 +697,12 @@ class YoutubeDL(object):
         self._post_hooks.append(ph)
 
     def add_progress_hook(self, ph):
-        """Add the progress hook (currently only for the file downloader)"""
+        """Add the download progress hook"""
         self._progress_hooks.append(ph)
+
+    def add_postprocessor_hook(self, ph):
+        """Add the postprocessing progress hook"""
+        self._postprocessor_hooks.append(ph)
 
     def _bidi_workaround(self, message):
         if not hasattr(self, '_output_channel'):
@@ -790,6 +816,11 @@ class YoutubeDL(object):
         self.to_stdout(
             message, skip_eol, quiet=self.params.get('quiet', False))
 
+    def _color_text(self, text, color):
+        if self.params.get('no_color'):
+            return text
+        return f'{TERMINAL_SEQUENCES[color.upper()]}{text}{TERMINAL_SEQUENCES["RESET_STYLE"]}'
+
     def report_warning(self, message, only_once=False):
         '''
         Print the message to stderr, it will be prefixed with 'WARNING:'
@@ -800,24 +831,14 @@ class YoutubeDL(object):
         else:
             if self.params.get('no_warnings'):
                 return
-            if not self.params.get('no_color') and self._err_file.isatty() and compat_os_name != 'nt':
-                _msg_header = '\033[0;33mWARNING:\033[0m'
-            else:
-                _msg_header = 'WARNING:'
-            warning_message = '%s %s' % (_msg_header, message)
-            self.to_stderr(warning_message, only_once)
+            self.to_stderr(f'{self._color_text("WARNING:", "yellow")} {message}', only_once)
 
     def report_error(self, message, tb=None):
         '''
         Do the same as trouble, but prefixes the message with 'ERROR:', colored
         in red if stderr is a tty file.
         '''
-        if not self.params.get('no_color') and self._err_file.isatty() and compat_os_name != 'nt':
-            _msg_header = '\033[0;31mERROR:\033[0m'
-        else:
-            _msg_header = 'ERROR:'
-        error_message = '%s %s' % (_msg_header, message)
-        self.trouble(error_message, tb)
+        self.trouble(f'{self._color_text("ERROR:", "red")} {message}', tb)
 
     def write_debug(self, message, only_once=False):
         '''Log debug message or Print message to stderr'''
@@ -919,7 +940,7 @@ class YoutubeDL(object):
             return err
 
     def prepare_outtmpl(self, outtmpl, info_dict, sanitize=None):
-        """ Make the template and info_dict suitable for substitution : ydl.outtmpl_escape(outtmpl) % info_dict """
+        """ Make the outtmpl and info_dict suitable for substitution: ydl.escape_outtmpl(outtmpl) % info_dict """
         info_dict.setdefault('epoch', int(time.time()))  # keep epoch consistent once set
 
         info_dict = dict(info_dict)  # Do not sanitize so as not to consume LazyList
@@ -1072,6 +1093,10 @@ class YoutubeDL(object):
             return '{prefix}%({key}){fmt}'.format(key=key, fmt=fmt, prefix=outer_mobj.group('prefix'))
 
         return EXTERNAL_FORMAT_RE.sub(create_key, outtmpl), TMPL_DICT
+
+    def evaluate_outtmpl(self, outtmpl, info_dict, *args, **kwargs):
+        outtmpl, info_dict = self.prepare_outtmpl(outtmpl, info_dict, *args, **kwargs)
+        return self.escape_outtmpl(outtmpl) % info_dict
 
     def _prepare_filename(self, info_dict, tmpl_type='default'):
         try:
@@ -1231,7 +1256,7 @@ class YoutubeDL(object):
             self.report_error('no suitable InfoExtractor for URL %s' % url)
 
     def __handle_extraction_exceptions(func):
-
+        @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
             try:
                 return func(self, *args, **kwargs)
@@ -1944,9 +1969,14 @@ class YoutubeDL(object):
                         filter_f = lambda f: _filter_f(f) and (
                             f.get('vcodec') != 'none' or f.get('acodec') != 'none')
                     else:
-                        filter_f = ((lambda f: f.get('ext') == format_spec)
-                                    if format_spec in ['mp4', 'flv', 'webm', '3gp', 'm4a', 'mp3', 'ogg', 'aac', 'wav']  # extension
-                                    else (lambda f: f.get('format_id') == format_spec))  # id
+                        if format_spec in ('m4a', 'mp3', 'ogg', 'aac'):  # audio extension
+                            filter_f = lambda f: f.get('ext') == format_spec and f.get('acodec') != 'none'
+                        elif format_spec in ('mp4', 'flv', 'webm', '3gp'):  # video extension
+                            filter_f = lambda f: f.get('ext') == format_spec and f.get('acodec') != 'none' and f.get('vcodec') != 'none'
+                        elif format_spec in ('mhtml', ):  # storyboards extension
+                            filter_f = lambda f: f.get('ext') == format_spec and f.get('acodec') == 'none' and f.get('vcodec') == 'none'
+                        else:
+                            filter_f = lambda f: f.get('format_id') == format_spec  # id
 
                     def selector_function(ctx):
                         formats = list(ctx['formats'])
@@ -2426,10 +2456,12 @@ class YoutubeDL(object):
         if self.params.get('forceprint') or self.params.get('forcejson'):
             self.post_extract(info_dict)
         for tmpl in self.params.get('forceprint', []):
-            if re.match(r'\w+$', tmpl):
+            mobj = re.match(r'\w+(=?)$', tmpl)
+            if mobj and mobj.group(1):
+                tmpl = f'{tmpl[:-1]} = %({tmpl[:-1]})s'
+            elif mobj:
                 tmpl = '%({})s'.format(tmpl)
-            tmpl, info_copy = self.prepare_outtmpl(tmpl, info_dict)
-            self.to_stdout(self.escape_outtmpl(tmpl) % info_copy)
+            self.to_stdout(self.evaluate_outtmpl(tmpl, info_dict))
 
         print_mandatory('title')
         print_mandatory('id')
@@ -2672,10 +2704,19 @@ class YoutubeDL(object):
 
                     requested_formats = info_dict['requested_formats']
                     old_ext = info_dict['ext']
-                    if self.params.get('merge_output_format') is None and not compatible_formats(requested_formats):
-                        info_dict['ext'] = 'mkv'
-                        self.report_warning(
-                            'Requested formats are incompatible for merge and will be merged into mkv.')
+                    if self.params.get('merge_output_format') is None:
+                        if not compatible_formats(requested_formats):
+                            info_dict['ext'] = 'mkv'
+                            self.report_warning(
+                                'Requested formats are incompatible for merge and will be merged into mkv')
+                        if (info_dict['ext'] == 'webm'
+                                and info_dict.get('thumbnails')
+                                # check with type instead of pp_key, __name__, or isinstance
+                                # since we dont want any custom PPs to trigger this
+                                and any(type(pp) == EmbedThumbnailPP for pp in self._pps['post_process'])):
+                            info_dict['ext'] = 'mkv'
+                            self.report_warning(
+                                'webm doesn\'t support embedding a thumbnail, mkv will be used')
                     new_ext = info_dict['ext']
 
                     def correct_ext(filename, ext=new_ext):
@@ -2815,7 +2856,8 @@ class YoutubeDL(object):
 
                     downloader = (get_suitable_downloader(info_dict, self.params).__name__
                                   if 'protocol' in info_dict else None)
-                    ffmpeg_fixup(downloader == 'HlsFD', 'malformed AAC bitstream detected', FFmpegFixupM3u8PP)
+                    ffmpeg_fixup(info_dict.get('requested_formats') is None and downloader == 'HlsFD',
+                                 'malformed AAC bitstream detected', FFmpegFixupM3u8PP)
                     ffmpeg_fixup(downloader == 'WebSocketFragmentFD', 'malformed timestamps detected', FFmpegFixupTimestampPP)
                     ffmpeg_fixup(downloader == 'WebSocketFragmentFD', 'malformed duration detected', FFmpegFixupDurationPP)
 
@@ -3029,9 +3071,7 @@ class YoutubeDL(object):
 
     @staticmethod
     def format_resolution(format, default='unknown'):
-        if format.get('vcodec') == 'none':
-            if format.get('acodec') == 'none':
-                return 'images'
+        if format.get('vcodec') == 'none' and format.get('acodec') != 'none':
             return 'audio only'
         if format.get('resolution') is not None:
             return format['resolution']
@@ -3043,6 +3083,8 @@ class YoutubeDL(object):
             res = '%dx?' % format['width']
         else:
             res = default
+        if format.get('vcodec') == 'none' and format.get('acodec') == 'none':
+            res += ' (images)'
         return res
 
     def _format_note(self, fdict):
@@ -3429,7 +3471,7 @@ class YoutubeDL(object):
             except (ExtractorError, IOError, OSError, ValueError) + network_exceptions as err:
                 self.report_warning(f'Unable to download video subtitles for {sub_lang!r}: {err}')
                 continue
-            return ret
+        return ret
 
     def _write_thumbnails(self, label, info_dict, filename, thumb_filename_base=None):
         ''' Write thumbnails to file and return list of (thumb_filename, final_thumb_filename) '''

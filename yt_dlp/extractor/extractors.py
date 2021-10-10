@@ -258,6 +258,7 @@ from .ciscolive import (
     CiscoLiveSessionIE,
     CiscoLiveSearchIE,
 )
+from .ciscowebex import CiscoWebexIE
 from .cjsw import CJSWIE
 from .cliphunter import CliphunterIE
 from .clippit import ClippitIE
@@ -340,7 +341,6 @@ from .discoveryplusindia import (
     DiscoveryPlusIndiaShowIE,
 )
 from .dotsub import DotsubIE
-from .douyin import DouyinIE
 from .douyutv import (
     DouyuShowIE,
     DouyuTVIE,
@@ -474,12 +474,7 @@ from .franceinter import FranceInterIE
 from .francetv import (
     FranceTVIE,
     FranceTVSiteIE,
-    FranceTVEmbedIE,
     FranceTVInfoIE,
-    FranceTVInfoSportIE,
-    FranceTVJeunesseIE,
-    GenerationWhatIE,
-    CultureboxIE,
 )
 from .freesound import FreesoundIE
 from .freespeech import FreespeechIE
@@ -525,6 +520,7 @@ from .googlepodcasts import (
     GooglePodcastsFeedIE,
 )
 from .googlesearch import GoogleSearchIE
+from .gopro import GoProIE
 from .goshgay import GoshgayIE
 from .gotostage import GoToStageIE
 from .gputechconf import GPUTechConfIE
@@ -937,6 +933,7 @@ from .nova import (
     NovaEmbedIE,
     NovaIE,
 )
+from .novaplay import NovaPlayIE
 from .nowness import (
     NownessIE,
     NownessPlaylistIE,
@@ -1433,7 +1430,10 @@ from .theplatform import (
 from .thescene import TheSceneIE
 from .thestar import TheStarIE
 from .thesun import TheSunIE
-from .theta import ThetaIE
+from .theta import (
+    ThetaVideoIE,
+    ThetaStreamIE,
+)
 from .theweatherchannel import TheWeatherChannelIE
 from .thisamericanlife import ThisAmericanLifeIE
 from .thisav import ThisAVIE
@@ -1442,6 +1442,7 @@ from .threeqsdn import ThreeQSDNIE
 from .tiktok import (
     TikTokIE,
     TikTokUserIE,
+    DouyinIE,
 )
 from .tinypic import TinyPicIE
 from .tmz import TMZIE
@@ -1710,6 +1711,7 @@ from .vtm import VTMIE
 from .medialaan import MedialaanIE
 from .vube import VubeIE
 from .vuclip import VuClipIE
+from .vupload import VuploadIE
 from .vvvvid import (
     VVVVIDIE,
     VVVVIDShowIE,
